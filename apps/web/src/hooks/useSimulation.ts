@@ -26,6 +26,7 @@ export interface SimState {
   history: SpikeEntry[]
   transits: SpikeTransit[]
   error: string | null
+  completed: boolean
 }
 
 const initial: SimState = {
@@ -38,6 +39,7 @@ const initial: SimState = {
   history: [],
   transits: [],
   error: null,
+  completed: false,
 }
 
 type ParsedState = {
@@ -109,6 +111,7 @@ export function useSimulation(network: RispNetwork | null) {
   const inputScheduleRef = useRef<number[][]>([])
   const networkJsonRef = useRef<string | null>(null)
   const transitsRef = useRef<SpikeTransit[]>([])
+  const skipNextNetworkEffect = useRef(false)
 
   useEffect(() => { networkRef.current = network }, [network])
 
@@ -137,6 +140,7 @@ export function useSimulation(network: RispNetwork | null) {
           ...prev,
           loaded: false,
           error: errMsg || 'load_network failed (no error details)',
+          completed: false,
         }))
         return
       }
@@ -150,9 +154,10 @@ export function useSimulation(network: RispNetwork | null) {
         history: [],
         transits: [],
         error: null,
+        completed: false,
       })
     } catch (e) {
-      setState(prev => ({ ...prev, loaded: false, error: String(e) }))
+      setState(prev => ({ ...prev, loaded: false, error: String(e), completed: false }))
     }
   }
 
@@ -173,6 +178,10 @@ export function useSimulation(network: RispNetwork | null) {
   }, [])
 
   useEffect(() => {
+    if (skipNextNetworkEffect.current) {
+      skipNextNetworkEffect.current = false
+      return
+    }
     if (!network) {
       setState(initial)
       simTimeRef.current = undefined
@@ -202,6 +211,9 @@ export function useSimulation(network: RispNetwork | null) {
     const newT = s.timestep
     timestepRef.current = newT
 
+    const simTime = simTimeRef.current
+    const completed = simTime !== undefined && newT >= simTime
+
     const freshTransits = computeTransits(
       transitsRef.current,
       s.spikes ?? [],
@@ -214,6 +226,7 @@ export function useSimulation(network: RispNetwork | null) {
     setState(prev => ({
       ...prev,
       timestep: newT,
+      completed,
       potentials: s.potentials ?? {},
       spikes: s.spikes ?? [],
       history: [...prev.history.slice(-49), { timestep: currentT, nodes: s.spikes ?? [] }],
@@ -264,6 +277,7 @@ export function useSimulation(network: RispNetwork | null) {
       ...prev,
       running: false,
       timestep: 0,
+      completed: false,
       potentials: {},
       spikes: [],
       history: [],
@@ -299,11 +313,14 @@ export function useSimulation(network: RispNetwork | null) {
     const finalState = readWasmState(mod)
     transitsRef.current = transits
     timestepRef.current = t
+    const simTime = simTimeRef.current
+    const completed = simTime !== undefined && t >= simTime
     setState(prev => ({
       ...prev,
       loaded: true,
       running: false,
       timestep: t,
+      completed,
       potentials: finalState?.potentials ?? {},
       spikes: finalState?.spikes ?? [],
       history: newHistory.slice(-50),
@@ -312,7 +329,7 @@ export function useSimulation(network: RispNetwork | null) {
   }, [])
 
   const setScheduleAt = useCallback((t: number, ids: number[]) => {
-    inputScheduleRef.current[t] = ids
+    inputScheduleRef.current[t] = [...ids].sort((a, b) => a - b)
   }, [])
 
   const getScheduleAt = useCallback((t: number): number[] => {
@@ -323,5 +340,25 @@ export function useSimulation(network: RispNetwork | null) {
     modRef.current?.ccall('apply_spikes', null, ['string'], [JSON.stringify(nodeIds)])
   }, [])
 
-  return { ...state, step, play, pause, reset, seek, applySpikes, setScheduleAt, getScheduleAt }
+  // Reload WASM with an edited network without wiping simulation state or schedule.
+  // Replays to the current timestep so history and potentials stay consistent.
+  const softReload = useCallback((net: RispNetwork) => {
+    if (!modRef.current) return
+    skipNextNetworkEffect.current = true
+    networkRef.current = net
+    networkJsonRef.current = JSON.stringify(net)
+    simTimeRef.current = net.Associated_Data?.other?.sim_time
+    seek(timestepRef.current)
+  }, [seek])
+
+  // Update network refs without replaying — safe when the change cannot affect
+  // existing simulation results (e.g. a neuron added with no new synapses).
+  const silentNetworkUpdate = useCallback((net: RispNetwork) => {
+    skipNextNetworkEffect.current = true
+    networkRef.current = net
+    networkJsonRef.current = JSON.stringify(net)
+    simTimeRef.current = net.Associated_Data?.other?.sim_time
+  }, [])
+
+  return { ...state, step, play, pause, reset, seek, applySpikes, setScheduleAt, getScheduleAt, softReload, silentNetworkUpdate }
 }

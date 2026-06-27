@@ -1,7 +1,7 @@
 // lastExportedRef breaks the feedback loop when the parent reflects our own emitted
 // change back as a prop update. SimVisualsContext is a pub-sub store so simulation
 // ticks bypass setNodes/setEdges — only the affected components re-render.
-import { createContext, memo, useCallback, useContext, useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { createContext, forwardRef, memo, useCallback, useContext, useEffect, useImperativeHandle, useRef, useState, useSyncExternalStore } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   ReactFlow,
@@ -27,6 +27,10 @@ import {
 import '@xyflow/react/dist/style.css'
 import type { RispNetwork } from '@shared/types'
 import type { SpikeTransit } from '../../hooks/useSimulation'
+
+export interface NetworkCanvasHandle {
+  getLayoutMap: () => Map<number, { x: number; y: number }>
+}
 
 const C = {
   bg:      '#111009',
@@ -83,6 +87,11 @@ function layoutGroup(
 }
 
 function autoLayout(network: RispNetwork): Map<number, { x: number; y: number }> {
+  if (network.Nodes.every(n => n.coords)) {
+    const positions = new Map<number, { x: number; y: number }>()
+    for (const n of network.Nodes) positions.set(n.id, n.coords!)
+    return positions
+  }
   const positions = new Map<number, { x: number; y: number }>()
   const inputSet  = new Set(network.Inputs)
   const outputSet = new Set(network.Outputs)
@@ -666,11 +675,17 @@ interface Props {
   spikeTransits?:     SpikeTransit[]
 }
 
-function NetworkCanvasInner({
+const NetworkCanvasInner = forwardRef<NetworkCanvasHandle, Props>(function NetworkCanvasInner({
   network, onChange, readOnly = false,
   externalSelection, spikingNodeIds, spikeTransits,
-}: Props) {
+}: Props, ref) {
   const rfInstance = useReactFlow()
+
+  useImperativeHandle(ref, () => ({
+    getLayoutMap: () => new Map(
+      (rfInstance.getNodes() as NeuronNode[]).map(n => [n.data.nodeId, n.position])
+    ),
+  }), [rfInstance])
   const [nodes, setNodes, onNodesChange] = useNodesState<NeuronNode>([])
   const [edges, setEdges, onEdgesChange] = useEdgesState<SynapseEdge>([])
   const [selNodeId, setSelNodeId] = useState<string | null>(null)
@@ -906,7 +921,15 @@ function NetworkCanvasInner({
   const handleExport = () => {
     if (!network) return
     const exported = rfToNetwork(nodes, edges, network)
-    const blob = new Blob([JSON.stringify(exported, null, 2)], { type: 'application/json' })
+    const posMap = new Map(nodes.map(n => [n.data.nodeId, n.position]))
+    const withCoords: RispNetwork = {
+      ...exported,
+      Nodes: exported.Nodes.map(n => {
+        const pos = posMap.get(n.id)
+        return pos ? { ...n, coords: pos } : n
+      }),
+    }
+    const blob = new Blob([JSON.stringify(withCoords, null, 2)], { type: 'application/json' })
     const url  = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url; a.download = 'network.json'; a.click()
@@ -1015,12 +1038,14 @@ function NetworkCanvasInner({
       )}
     </div>
   )
-}
+})
 
-export default function NetworkCanvas(props: Props) {
+const NetworkCanvas = forwardRef<NetworkCanvasHandle, Props>(function NetworkCanvas(props, ref) {
   return (
     <ReactFlowProvider>
-      <NetworkCanvasInner {...props} />
+      <NetworkCanvasInner {...props} ref={ref} />
     </ReactFlowProvider>
   )
-}
+})
+
+export default NetworkCanvas

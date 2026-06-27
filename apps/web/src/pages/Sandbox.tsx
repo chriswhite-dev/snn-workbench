@@ -1,11 +1,11 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import type { RispNetwork, NetworkMeta } from '@shared/types'
 import { api } from '../lib/api'
 import { useSimulation } from '../hooks/useSimulation'
 import UploadZone from '../components/sandbox/UploadZone'
 import NetworkCreator from '../components/sandbox/NetworkCreator'
-import NetworkCanvas from '../components/sandbox/NetworkCanvas'
+import NetworkCanvas, { type NetworkCanvasHandle } from '../components/sandbox/NetworkCanvas'
 import NetworkExplorer from '../components/sandbox/NetworkExplorer'
 import SimControls from '../components/sandbox/SimControls'
 import SpikeRaster from '../components/sandbox/SpikeRaster'
@@ -27,6 +27,7 @@ export default function Sandbox() {
   const [network, setNetwork] = useState<RispNetwork | null>(null)
   const [meta, setMeta] = useState<NetworkMeta | null>(null)
   const sim = useSimulation(network)
+  const canvasRef = useRef<NetworkCanvasHandle>(null)
   const [pendingFile, setPendingFile] = useState<File | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -113,7 +114,7 @@ export default function Sandbox() {
   function handleToggle(id: number) {
     const cur = new Set(currentSchedule)
     if (cur.has(id)) cur.delete(id); else cur.add(id)
-    sim.setScheduleAt(sim.timestep, Array.from(cur).sort((a, b) => a - b))
+    sim.setScheduleAt(sim.timestep, Array.from(cur))
     setScheduleVersion(v => v + 1)
   }
 
@@ -137,16 +138,28 @@ export default function Sandbox() {
     if (!network) return
     const colonIdx = scheduleText.indexOf(':')
     if (colonIdx === -1) return
-    const t = parseInt(scheduleText.slice(0, colonIdx).trim(), 10)
+
+    const tPart = scheduleText.slice(0, colonIdx).trim()
     const simTime = sim.simTime ?? 50
-    if (isNaN(t) || t < 0) {
-      setScheduleError('Timestep must be a non-negative integer')
-      return
+
+    const timesteps = new Set<number>()
+    for (const segment of tPart.split(',')) {
+      const seg = segment.trim()
+      const rangeMatch = seg.match(/^(\d+)-(\d+)$/)
+      if (rangeMatch) {
+        const t1 = parseInt(rangeMatch[1], 10)
+        const t2 = parseInt(rangeMatch[2], 10)
+        if (t1 > t2) { setScheduleError(`Range ${seg}: start must be ≤ end`); return }
+        if (t2 >= simTime) { setScheduleError(`Timestep ${t2} out of range (0–${simTime - 1})`); return }
+        for (let t = t1; t <= t2; t++) timesteps.add(t)
+      } else {
+        const t = parseInt(seg, 10)
+        if (isNaN(t) || t < 0) { setScheduleError('Timestep must be a non-negative integer'); return }
+        if (t >= simTime) { setScheduleError(`Timestep ${t} out of range (0–${simTime - 1})`); return }
+        timesteps.add(t)
+      }
     }
-    if (t >= simTime) {
-      setScheduleError(`Timestep ${t} out of range (0–${simTime - 1})`)
-      return
-    }
+    if (timesteps.size === 0) return
 
     const inputIds = new Set(network.Inputs ?? [])
     const nameToId = new Map<string, number>()
@@ -171,30 +184,42 @@ export default function Sandbox() {
       }
     }
 
-    sim.setScheduleAt(t, validIds)
+    for (const t of timesteps) {
+      sim.setScheduleAt(t, validIds)
+    }
     setScheduleVersion(v => v + 1)
     if (invalidTokens.length > 0) {
       setScheduleError(`Unknown: ${invalidTokens.join(', ')}`)
-      // leave text intact so the user can correct the invalid tokens
     } else {
       setScheduleText('')
       setDraftTimestep(null)
       setScheduleError(null)
     }
-    if (t < sim.timestep) sim.seek(t)
+    if (Math.min(...timesteps) < sim.timestep) sim.seek(sim.timestep)
   }
 
   function handleDeleteSchedule(t: number) {
     sim.setScheduleAt(t, [])
     setScheduleVersion(v => v + 1)
     if (draftTimestep === t) setDraftTimestep(null)
+    if (t <= sim.timestep) sim.seek(t)
   }
 
   async function handleUploadToLibrary() {
     if (!network || !uploadForm.name || !uploadForm.submitter_name) return
     setUploading(true)
+    const layoutMap = canvasRef.current?.getLayoutMap()
+    const networkWithCoords: RispNetwork = layoutMap
+      ? {
+          ...network,
+          Nodes: network.Nodes.map(n => {
+            const pos = layoutMap.get(n.id)
+            return pos ? { ...n, coords: pos } : n
+          }),
+        }
+      : network
     const fd = new FormData()
-    const blob = new Blob([JSON.stringify(network)], { type: 'application/json' })
+    const blob = new Blob([JSON.stringify(networkWithCoords)], { type: 'application/json' })
     const filename = pendingFile?.name ?? 'network.json'
     fd.append('file', new File([blob], filename, { type: 'application/json' }))
     fd.append('name', uploadForm.name)
@@ -337,8 +362,18 @@ export default function Sandbox() {
             {/* Left column — its height defines the sidebar's bounds (canvas top → raster bottom) */}
             <div className="flex-1 min-w-0 space-y-4 pr-[20rem]">
               <NetworkCanvas
+                ref={canvasRef}
                 network={network}
-                onChange={setNetwork}
+                onChange={(net) => {
+                  const onlyNodesAdded =
+                    JSON.stringify(network.Edges) === JSON.stringify(net.Edges) &&
+                    JSON.stringify(network.Inputs) === JSON.stringify(net.Inputs) &&
+                    JSON.stringify(network.Outputs) === JSON.stringify(net.Outputs) &&
+                    net.Nodes.length > network.Nodes.length
+                  if (onlyNodesAdded) sim.silentNetworkUpdate(net)
+                  else sim.softReload(net)
+                  setNetwork(net)
+                }}
                 readOnly={sim.running}
                 externalSelection={externalSelection}
                 spikingNodeIds={sim.spikes}
@@ -349,11 +384,18 @@ export default function Sandbox() {
                 running={sim.running}
                 timestep={sim.timestep}
                 simTime={sim.simTime}
+                completed={sim.completed}
                 onStep={sim.step}
                 onBack={() => sim.seek(Math.max(0, sim.timestep - 1))}
                 onPlay={sim.play}
                 onPause={sim.pause}
-                onReset={sim.reset}
+                onReset={() => {
+                  sim.reset()
+                  setScheduleVersion(v => v + 1)
+                  setDraftTimestep(null)
+                  setScheduleText('')
+                  setScheduleError(null)
+                }}
                 onRewind={() => sim.seek(0)}
                 onSeek={sim.seek}
               />
@@ -377,7 +419,7 @@ export default function Sandbox() {
                   onDelete={handleDeleteSchedule}
                   onTextChange={(text) => { setScheduleText(text); setScheduleError(null) }}
                   onTextApply={handleScheduleTextApply}
-                  onTextCancel={() => { setScheduleText(''); setScheduleError(null) }}
+                  onTextCancel={() => { setScheduleText(''); setScheduleError(null); setDraftTimestep(null) }}
                 />
               </div>
 

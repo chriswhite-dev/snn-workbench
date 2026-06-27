@@ -17,6 +17,7 @@ export interface RispNode {
   id: number
   values: number[]
   name?: string
+  coords?: { x: number; y: number }
 }
 
 export interface RispEdge {

@@ -16,6 +16,7 @@ const ROW_H = CELL_H + CELL_GAP
 const PAD_X = 6
 const PAD_Y = 4
 const MIN_CELL_W = 5
+const HEADER_H = 16
 
 function labelFor(id: number, names?: Record<number, string>): string {
   const name = names?.[id]
@@ -53,7 +54,7 @@ export default function SpikeRaster({ history, nodeIds, nodeNames }: Props) {
   const availForCells = containerWidth - LABEL_W - PAD_X * 2
   const cellW = containerWidth > 0 ? Math.max(MIN_CELL_W, availForCells / MAX_STEPS) : 9
   const canvasW = Math.max(LABEL_W + MAX_STEPS * cellW + PAD_X * 2, containerWidth || 0)
-  const canvasH = PAD_Y + nNeurons * ROW_H + PAD_Y
+  const canvasH = HEADER_H + PAD_Y + nNeurons * ROW_H + PAD_Y
 
   // Draw raster onto canvas imperatively — avoids reconciling N×50 SVG <rect> elements.
   useEffect(() => {
@@ -84,12 +85,23 @@ export default function SpikeRaster({ history, nodeIds, nodeNames }: Props) {
     }
 
     ctx.font = `${FONT_SIZE}px "JetBrains Mono", ui-monospace, monospace`
-    ctx.textAlign = 'right'
     ctx.textBaseline = 'alphabetic'
 
+    const interval = cellW >= 18 ? 1 : cellW >= 10 ? 5 : 10
+    ctx.fillStyle = '#9e8f7e'
+    ctx.textAlign = 'center'
+    for (let col = 0; col < recent.length; col++) {
+      const { timestep } = recent[col]
+      if (timestep % interval === 0) {
+        const x = LABEL_W + PAD_X + col * cellW + cellW / 2
+        ctx.fillText(String(timestep), x, HEADER_H - 4)
+      }
+    }
+
+    ctx.textAlign = 'right'
     for (let row = 0; row < nNeurons; row++) {
       const nodeId = sortedIds[row]
-      const y = PAD_Y + row * ROW_H
+      const y = HEADER_H + PAD_Y + row * ROW_H
 
       ctx.fillStyle = '#9e8f7e'
       ctx.fillText(labelFor(nodeId, nodeNames), LABEL_W - 6, y + CELL_H - 3)

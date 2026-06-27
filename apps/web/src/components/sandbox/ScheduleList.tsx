@@ -26,7 +26,8 @@ export default function ScheduleList({
             value={scheduleText}
             onChange={e => onTextChange(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter') onTextApply(); if (e.key === 'Escape') onTextCancel() }}
-            placeholder='t: id1, id2, "name" ...'
+            placeholder='t, t1-t2, ...: id1, id2, "name" ...'
+            title={'Schedule format:\n  Single: 5: id1, id2\n  Range: 0-5: id1, id2\n  Mixed: 0-5, 8: id1, id2\n\nNeurons can be numeric IDs or quoted names.\nExample: 0-3, 7: 0, "input_a"'}
             className={`flex-1 font-mono text-xs bg-bg text-text-primary border px-2 py-1 focus:outline-none placeholder:text-text-muted placeholder:opacity-40 transition-colors ${
               scheduleError ? 'border-accent' : 'border-border focus:border-text-muted'
             }`}

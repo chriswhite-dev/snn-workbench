@@ -21,7 +21,7 @@ export default function SpikeInputPanel({
       <div className="px-3 py-2 border-b border-border flex items-center justify-between">
         <div className="flex items-center gap-3">
           <span className="font-mono text-2xs text-text-muted tracking-widest uppercase">
-            Input Schedule
+            Input Scheduler
           </span>
           <span className="font-mono text-2xs text-text-secondary" title="Current timestep">
             t = {displayTimestep}

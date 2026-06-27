@@ -25,6 +25,7 @@ const RispNodeSchema = z.object({
   id: z.number().int().nonnegative(),
   values: z.array(z.number()).min(1).max(MAX_VALUES_PER_ELEMENT),
   name: z.string().max(128).optional(),
+  coords: z.object({ x: z.number(), y: z.number() }).optional(),
 })
 
 const RispEdgeSchema = z.object({

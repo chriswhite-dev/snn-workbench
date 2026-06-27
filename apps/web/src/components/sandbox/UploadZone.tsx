@@ -42,6 +42,10 @@ function sanitizeNetwork(raw: Record<string, unknown>): RispNetwork {
       values: n.values as number[],
     }
     if (typeof n.name === 'string' && n.name) node.name = n.name
+    const c = n.coords as Record<string, unknown> | undefined
+    if (c && typeof c.x === 'number' && typeof c.y === 'number') {
+      node.coords = { x: c.x, y: c.y }
+    }
     return node
   })
 
