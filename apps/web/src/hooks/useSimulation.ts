@@ -1,0 +1,327 @@
+import { useCallback, useEffect, useRef, useState } from 'react'
+import type { RispNetwork } from '@shared/types'
+import { getRispModule, type RispModule } from '../lib/risp'
+
+export interface SpikeEntry {
+  timestep: number
+  nodes: number[]
+}
+
+export interface SpikeTransit {
+  edgeId: string
+  fromNode: number
+  toNode: number
+  launchedAt: number  // currentT before the step that caused the spike
+  arrivesAt: number   // launchedAt + delay
+  progress: number    // (displayT - launchedAt) / delay, clamped to 0..1
+}
+
+export interface SimState {
+  loaded: boolean
+  running: boolean
+  timestep: number
+  simTime: number | undefined
+  potentials: Record<string, number>
+  spikes: number[]
+  history: SpikeEntry[]
+  transits: SpikeTransit[]
+  error: string | null
+}
+
+const initial: SimState = {
+  loaded: false,
+  running: false,
+  timestep: 0,
+  simTime: undefined,
+  potentials: {},
+  spikes: [],
+  history: [],
+  transits: [],
+  error: null,
+}
+
+type ParsedState = {
+  timestep: number
+  potentials: Record<string, number>
+  spikes: number[]
+}
+
+function readWasmState(mod: RispModule): ParsedState | null {
+  try {
+    const raw = mod.ccall('get_state', 'string', [], []) as string
+    return JSON.parse(raw) as ParsedState
+  } catch {
+    return null
+  }
+}
+
+// arrivesAt >= newT keeps delay-1 spikes visible for exactly one frame at progress=1.
+function computeTransits(
+  prev: SpikeTransit[],
+  spikingNodes: number[],
+  currentT: number,
+  newT: number,
+  net: RispNetwork | null,
+): SpikeTransit[] {
+  const next: SpikeTransit[] = []
+
+  for (const tr of prev) {
+    if (tr.arrivesAt >= newT) {
+      const elapsed = newT - tr.launchedAt
+      const duration = tr.arrivesAt - tr.launchedAt
+      next.push({ ...tr, progress: elapsed / duration })
+    }
+  }
+
+  if (net) {
+    for (const nodeId of spikingNodes) {
+      for (const edge of net.Edges) {
+        if (edge.from === nodeId) {
+          const delay = Math.max(1, Math.round(edge.values[1] ?? 1))
+          const arrivesAt = currentT + delay
+          if (arrivesAt >= newT) {
+            next.push({
+              edgeId: `${edge.from}->${edge.to}`,
+              fromNode: edge.from,
+              toNode: edge.to,
+              launchedAt: currentT,
+              arrivesAt,
+              progress: (newT - currentT) / delay,
+            })
+          }
+        }
+      }
+    }
+  }
+
+  return next
+}
+
+export function useSimulation(network: RispNetwork | null) {
+  const [state, setState] = useState<SimState>(initial)
+  const modRef = useRef<RispModule | null>(null)
+  const pendingNetworkRef = useRef<RispNetwork | null>(null)
+  const networkRef = useRef<RispNetwork | null>(network)
+  const runningRef = useRef(false)
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const simTimeRef = useRef<number | undefined>(undefined)
+  const timestepRef = useRef<number>(0)
+  const inputScheduleRef = useRef<number[][]>([])
+  const networkJsonRef = useRef<string | null>(null)
+  const transitsRef = useRef<SpikeTransit[]>([])
+
+  useEffect(() => { networkRef.current = network }, [network])
+
+  function stopInterval() {
+    if (intervalRef.current !== null) {
+      clearInterval(intervalRef.current)
+      intervalRef.current = null
+    }
+  }
+
+  function loadNetworkIntoWasm(mod: RispModule, net: RispNetwork) {
+    stopInterval()
+    runningRef.current = false
+    const simTime = net.Associated_Data?.other?.sim_time
+    simTimeRef.current = simTime
+    networkJsonRef.current = JSON.stringify(net)
+    inputScheduleRef.current = []
+    timestepRef.current = 0
+    transitsRef.current = []
+    try {
+      mod.ccall('load_network', null, ['string'], [JSON.stringify(net)])
+      const s = readWasmState(mod)
+      if (!s || Object.keys(s).length === 0 || s.timestep === undefined) {
+        const errMsg = mod.ccall('get_error', 'string', [], []) as string
+        setState(prev => ({
+          ...prev,
+          loaded: false,
+          error: errMsg || 'load_network failed (no error details)',
+        }))
+        return
+      }
+      setState({
+        loaded: true,
+        running: false,
+        timestep: 0,
+        simTime,
+        potentials: s.potentials ?? {},
+        spikes: [],
+        history: [],
+        transits: [],
+        error: null,
+      })
+    } catch (e) {
+      setState(prev => ({ ...prev, loaded: false, error: String(e) }))
+    }
+  }
+
+  useEffect(() => {
+    getRispModule()
+      .then(mod => {
+        modRef.current = mod
+        if (pendingNetworkRef.current) {
+          loadNetworkIntoWasm(mod, pendingNetworkRef.current)
+          pendingNetworkRef.current = null
+        }
+      })
+      .catch(e => {
+        setState(prev => ({ ...prev, error: `WASM failed to load: ${e}` }))
+      })
+    return () => { stopInterval() }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  useEffect(() => {
+    if (!network) {
+      setState(initial)
+      simTimeRef.current = undefined
+      timestepRef.current = 0
+      networkJsonRef.current = null
+      inputScheduleRef.current = []
+      transitsRef.current = []
+      return
+    }
+    if (!modRef.current) {
+      pendingNetworkRef.current = network
+      return
+    }
+    loadNetworkIntoWasm(modRef.current, network)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [network])
+
+  function doStep(mod: RispModule): number {
+    const currentT = timestepRef.current
+    const spikeIds = inputScheduleRef.current[currentT] ?? []
+    if (spikeIds.length > 0) {
+      mod.ccall('apply_spikes', null, ['string'], [JSON.stringify(spikeIds)])
+    }
+    mod.ccall('step', null, [], [])
+    const s = readWasmState(mod)
+    if (!s) return currentT
+    const newT = s.timestep
+    timestepRef.current = newT
+
+    const freshTransits = computeTransits(
+      transitsRef.current,
+      s.spikes ?? [],
+      currentT,
+      newT,
+      networkRef.current,
+    )
+    transitsRef.current = freshTransits
+
+    setState(prev => ({
+      ...prev,
+      timestep: newT,
+      potentials: s.potentials ?? {},
+      spikes: s.spikes ?? [],
+      history: [...prev.history.slice(-49), { timestep: currentT, nodes: s.spikes ?? [] }],
+      transits: freshTransits,
+    }))
+    return newT
+  }
+
+  const step = useCallback(() => {
+    const mod = modRef.current
+    if (!mod) return
+    doStep(mod)
+  }, [])
+
+  const play = useCallback(() => {
+    if (runningRef.current) return
+    runningRef.current = true
+    setState(prev => ({ ...prev, running: true }))
+
+    intervalRef.current = setInterval(() => {
+      const mod = modRef.current
+      if (!mod) return
+      const newT = doStep(mod)
+      const st = simTimeRef.current
+      if (st !== undefined && newT >= st) {
+        runningRef.current = false
+        stopInterval()
+        setState(prev => ({ ...prev, running: false }))
+      }
+    }, 100)
+  }, [])
+
+  const pause = useCallback(() => {
+    runningRef.current = false
+    stopInterval()
+    setState(prev => ({ ...prev, running: false }))
+  }, [])
+
+  const reset = useCallback(() => {
+    pause()
+    const mod = modRef.current
+    if (!mod) return
+    mod.ccall('reset', null, [], [])
+    inputScheduleRef.current = []
+    timestepRef.current = 0
+    transitsRef.current = []
+    setState(prev => ({
+      ...prev,
+      running: false,
+      timestep: 0,
+      potentials: {},
+      spikes: [],
+      history: [],
+      transits: [],
+    }))
+  }, [pause])
+
+  const seek = useCallback((t: number) => {
+    const mod = modRef.current
+    if (!mod || !networkJsonRef.current) return
+    stopInterval()
+    runningRef.current = false
+
+    mod.ccall('load_network', null, ['string'], [networkJsonRef.current])
+
+    const schedule = inputScheduleRef.current
+    const newHistory: SpikeEntry[] = []
+    let transits: SpikeTransit[] = []
+
+    for (let i = 0; i < t; i++) {
+      const inputs = schedule[i] ?? []
+      if (inputs.length > 0) {
+        mod.ccall('apply_spikes', null, ['string'], [JSON.stringify(inputs)])
+      }
+      mod.ccall('step', null, [], [])
+      const s = readWasmState(mod)
+      if (s && s.timestep !== undefined) {
+        transits = computeTransits(transits, s.spikes ?? [], i, s.timestep, networkRef.current)
+        newHistory.push({ timestep: i, nodes: s.spikes ?? [] })
+      }
+    }
+
+    const finalState = readWasmState(mod)
+    transitsRef.current = transits
+    timestepRef.current = t
+    setState(prev => ({
+      ...prev,
+      loaded: true,
+      running: false,
+      timestep: t,
+      potentials: finalState?.potentials ?? {},
+      spikes: finalState?.spikes ?? [],
+      history: newHistory.slice(-50),
+      transits,
+    }))
+  }, [])
+
+  const setScheduleAt = useCallback((t: number, ids: number[]) => {
+    inputScheduleRef.current[t] = ids
+  }, [])
+
+  const getScheduleAt = useCallback((t: number): number[] => {
+    return inputScheduleRef.current[t] ?? []
+  }, [])
+
+  const applySpikes = useCallback((nodeIds: number[]) => {
+    modRef.current?.ccall('apply_spikes', null, ['string'], [JSON.stringify(nodeIds)])
+  }, [])
+
+  return { ...state, step, play, pause, reset, seek, applySpikes, setScheduleAt, getScheduleAt }
+}

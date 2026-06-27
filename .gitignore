@@ -1,0 +1,23 @@
+# deps
+node_modules/
+
+# build output
+apps/web/dist/
+apps/web/.vite/
+
+# env files with secrets
+.env
+.env.local
+.env.*.local
+
+# uploaded user files (stored in R2 in production)
+apps/api/uploads/
+
+# temp / scratch
+tmpnet.json
+*.tmp
+
+# editor / OS
+.DS_Store
+.vscode/
+*.swp
