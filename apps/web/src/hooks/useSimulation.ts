@@ -240,7 +240,7 @@ export function useSimulation(network: RispNetwork | null) {
       completed,
       potentials: s.potentials ?? {},
       spikes: s.spikes ?? [],
-      history: [...prev.history.slice(-49), { timestep: currentT, nodes: s.spikes ?? [] }],
+      history: [...prev.history, { timestep: currentT, nodes: s.spikes ?? [] }],
       transits: freshTransits,
     }))
     return newT
@@ -334,7 +334,7 @@ export function useSimulation(network: RispNetwork | null) {
       completed,
       potentials: finalState?.potentials ?? {},
       spikes: finalState?.spikes ?? [],
-      history: newHistory.slice(-50),
+      history: newHistory,
       transits,
     }))
   }, [])

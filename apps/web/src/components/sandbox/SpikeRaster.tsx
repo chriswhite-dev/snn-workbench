@@ -7,7 +7,6 @@ interface Props {
   nodeNames?: Record<number, string>
 }
 
-const MAX_STEPS = 50
 const FONT_SIZE = 9
 const CHARS_PER_PX = 5.4
 const CELL_H = 14
@@ -17,6 +16,7 @@ const PAD_X = 6
 const PAD_Y = 4
 const MIN_CELL_W = 5
 const HEADER_H = 16
+const VIEWPORT_STEPS = 50
 
 function labelFor(id: number, names?: Record<number, string>): string {
   const name = names?.[id]
@@ -25,94 +25,118 @@ function labelFor(id: number, names?: Record<number, string>): string {
 
 export default function SpikeRaster({ history, nodeIds, nodeNames }: Props) {
   const sortedIds = useMemo(() => [...nodeIds].sort((a, b) => a - b), [nodeIds])
-  const canvasRef = useRef<HTMLCanvasElement>(null)
-  const roRef = useRef<ResizeObserver | null>(null)
+  const labelsCanvasRef = useRef<HTMLCanvasElement>(null)
+  const cellsCanvasRef  = useRef<HTMLCanvasElement>(null)
+  const scrollDivRef    = useRef<HTMLDivElement | null>(null)
+  const roRef           = useRef<ResizeObserver | null>(null)
+  const atRightEdgeRef  = useRef(true)
   const [containerWidth, setContainerWidth] = useState(0)
 
-  useEffect(() => {
-    return () => { roRef.current?.disconnect() }
-  }, [])
+  useEffect(() => { return () => { roRef.current?.disconnect() } }, [])
 
-  // Callback ref so the observer re-attaches if the div mounts after initial render (nNeurons=0 case).
   const containerRef = useCallback((el: HTMLDivElement | null) => {
     roRef.current?.disconnect()
     roRef.current = null
     if (!el) return
+    // ResizeObserver fires async; read immediately so the first draw isn't skipped
+    const w = el.getBoundingClientRect().width
+    if (w > 0) setContainerWidth(w)
     const ro = new ResizeObserver(([entry]) => setContainerWidth(entry.contentRect.width))
     ro.observe(el)
     roRef.current = ro
   }, [])
 
+  const scrollRef = useCallback((el: HTMLDivElement | null) => {
+    scrollDivRef.current = el
+    if (!el) return
+    el.addEventListener('scroll', () => {
+      atRightEdgeRef.current = el.scrollLeft + el.clientWidth >= el.scrollWidth - 5
+    })
+  }, [])
+
   const nNeurons = sortedIds.length
-  const recent = history.slice(-MAX_STEPS)
+  const nSteps   = history.length
 
   const maxLabelLen = useMemo(
     () => sortedIds.reduce((max, id) => Math.max(max, labelFor(id, nodeNames).length), 0),
     [sortedIds, nodeNames]
   )
-  const LABEL_W = Math.max(36, Math.ceil(maxLabelLen * CHARS_PER_PX) + 12)
-  const availForCells = containerWidth - LABEL_W - PAD_X * 2
-  const cellW = containerWidth > 0 ? Math.max(MIN_CELL_W, availForCells / MAX_STEPS) : 9
-  const canvasW = Math.max(LABEL_W + MAX_STEPS * cellW + PAD_X * 2, containerWidth || 0)
-  const canvasH = HEADER_H + PAD_Y + nNeurons * ROW_H + PAD_Y
+  const LABEL_W      = Math.max(36, Math.ceil(maxLabelLen * CHARS_PER_PX) + 12)
+  const cellsAvail   = containerWidth - LABEL_W - PAD_X * 2
+  const cellW        = containerWidth > 0 ? Math.max(MIN_CELL_W, cellsAvail / VIEWPORT_STEPS) : MIN_CELL_W
+  const cellsCanvasW = Math.max(nSteps * cellW + PAD_X * 2, containerWidth - LABEL_W || 0)
+  const canvasH      = HEADER_H + PAD_Y + nNeurons * ROW_H + PAD_Y
 
-  // Draw raster onto canvas imperatively — avoids reconciling N×50 SVG <rect> elements.
   useEffect(() => {
-    const canvas = canvasRef.current
-    if (!canvas || nNeurons === 0 || containerWidth === 0) return
+    const lc = labelsCanvasRef.current
+    const cc = cellsCanvasRef.current
+    if (!lc || !cc || nNeurons === 0 || containerWidth === 0) return
 
     const dpr = window.devicePixelRatio || 1
-    const w = Math.round(canvasW)
-    const h = Math.round(canvasH)
+    const h   = Math.round(canvasH)
+    const lw  = Math.round(LABEL_W)
+    const cw  = Math.round(cellsCanvasW)
 
-    if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
-      canvas.width = w * dpr
-      canvas.height = h * dpr
-      canvas.style.width = w + 'px'
-      canvas.style.height = h + 'px'
+    for (const [canvas, w] of [[lc, lw], [cc, cw]] as const) {
+      if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
+        canvas.width        = w * dpr
+        canvas.height       = h * dpr
+        canvas.style.width  = w + 'px'
+        canvas.style.height = h + 'px'
+      }
     }
 
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    const lctx = lc.getContext('2d')
+    const cctx = cc.getContext('2d')
+    if (!lctx || !cctx) return
 
-    ctx.fillStyle = '#111009'
-    ctx.fillRect(0, 0, w, h)
+    lctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    cctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+
+    lctx.fillStyle = '#111009'
+    lctx.fillRect(0, 0, lw, h)
+    cctx.fillStyle = '#111009'
+    cctx.fillRect(0, 0, cw, h)
 
     const spikeSet = new Set<string>()
-    for (const { timestep, nodes } of recent) {
+    for (const { timestep, nodes } of history) {
       for (const n of nodes) spikeSet.add(`${timestep}:${n}`)
     }
 
-    ctx.font = `${FONT_SIZE}px "JetBrains Mono", ui-monospace, monospace`
-    ctx.textBaseline = 'alphabetic'
+    lctx.font          = `${FONT_SIZE}px "JetBrains Mono", ui-monospace, monospace`
+    lctx.textBaseline  = 'alphabetic'
+    lctx.textAlign     = 'right'
+    lctx.fillStyle     = '#9e8f7e'
+    for (let row = 0; row < nNeurons; row++) {
+      const y = HEADER_H + PAD_Y + row * ROW_H
+      lctx.fillText(labelFor(sortedIds[row], nodeNames), lw - 6, y + CELL_H - 3)
+    }
 
     const interval = cellW >= 18 ? 1 : cellW >= 10 ? 5 : 10
-    ctx.fillStyle = '#9e8f7e'
-    ctx.textAlign = 'center'
-    for (let col = 0; col < recent.length; col++) {
-      const { timestep } = recent[col]
+    cctx.font         = `${FONT_SIZE}px "JetBrains Mono", ui-monospace, monospace`
+    cctx.textBaseline = 'alphabetic'
+    cctx.textAlign    = 'center'
+    cctx.fillStyle    = '#9e8f7e'
+    for (let col = 0; col < history.length; col++) {
+      const { timestep } = history[col]
       if (timestep % interval === 0) {
-        const x = LABEL_W + PAD_X + col * cellW + cellW / 2
-        ctx.fillText(String(timestep), x, HEADER_H - 4)
+        cctx.fillText(String(timestep), PAD_X + col * cellW + cellW / 2, HEADER_H - 4)
       }
     }
 
-    ctx.textAlign = 'right'
     for (let row = 0; row < nNeurons; row++) {
       const nodeId = sortedIds[row]
-      const y = HEADER_H + PAD_Y + row * ROW_H
-
-      ctx.fillStyle = '#9e8f7e'
-      ctx.fillText(labelFor(nodeId, nodeNames), LABEL_W - 6, y + CELL_H - 3)
-
-      for (let col = 0; col < recent.length; col++) {
-        const { timestep } = recent[col]
-        ctx.fillStyle = spikeSet.has(`${timestep}:${nodeId}`) ? '#d4622a' : '#272420'
-        ctx.fillRect(LABEL_W + PAD_X + col * cellW, y, Math.max(1, cellW - 1), CELL_H)
+      const y      = HEADER_H + PAD_Y + row * ROW_H
+      for (let col = 0; col < history.length; col++) {
+        const { timestep } = history[col]
+        cctx.fillStyle = spikeSet.has(`${timestep}:${nodeId}`) ? '#d4622a' : '#272420'
+        cctx.fillRect(PAD_X + col * cellW, y, Math.max(1, cellW - 1), CELL_H)
       }
     }
-  }, [history, sortedIds, nodeNames, containerWidth, canvasW, canvasH, nNeurons, cellW, LABEL_W, recent])
+
+    const scrollEl = scrollDivRef.current
+    if (scrollEl && atRightEdgeRef.current) scrollEl.scrollLeft = cw
+  }, [history, sortedIds, nodeNames, containerWidth, cellsCanvasW, canvasH, nNeurons, cellW, LABEL_W])
 
   const header = (
     <div className="px-3 py-2 border-b border-border flex items-center justify-between">
@@ -127,9 +151,9 @@ export default function SpikeRaster({ history, nodeIds, nodeNames }: Props) {
           rows = neurons · cols = timesteps · orange = spike
         </span>
       </div>
-      {recent.length > 0 ? (
+      {history.length > 0 ? (
         <span className="font-mono text-2xs text-text-muted">
-          {nNeurons} neurons · last t={recent[recent.length - 1]?.timestep}
+          {nNeurons} neurons · last t={history[history.length - 1]?.timestep}
         </span>
       ) : (
         <span className="font-mono text-2xs text-text-muted">step the simulation to see spikes</span>
@@ -151,8 +175,11 @@ export default function SpikeRaster({ history, nodeIds, nodeNames }: Props) {
   return (
     <div className="border border-border">
       {header}
-      <div ref={containerRef} className="bg-surface overflow-x-auto">
-        <canvas ref={canvasRef} style={{ display: 'block' }} />
+      <div ref={containerRef} className="bg-surface flex">
+        <canvas ref={labelsCanvasRef} style={{ display: 'block', flexShrink: 0 }} />
+        <div ref={scrollRef} className="overflow-x-auto flex-1 min-w-0">
+          <canvas ref={cellsCanvasRef} style={{ display: 'block' }} />
+        </div>
       </div>
     </div>
   )
