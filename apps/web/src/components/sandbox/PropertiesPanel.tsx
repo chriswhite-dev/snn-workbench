@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { RispNetwork, RispProcParams } from '@shared/types'
 import type { SpikeTransit } from '../../hooks/useSimulation'
 
@@ -18,6 +18,65 @@ interface Props {
   nodeNames?: Record<number, string>
   spikeTransits?: SpikeTransit[]
   timestep?: number
+  onProcParamsChange?: (params: RispProcParams, simTime?: number) => void
+}
+
+const editInputCls = 'w-20 px-2 py-0.5 font-mono text-xs bg-bg border border-border text-text-primary focus:outline-none focus:border-text-muted transition-colors text-right'
+
+function DraftInput({ value, isInt, onChange }: {
+  value: number | undefined
+  isInt?: boolean
+  onChange: (v: number | undefined) => void
+}) {
+  const [draft, setDraft] = useState(value !== undefined ? String(value) : '')
+  const savedRef = useRef(value)
+
+  useEffect(() => {
+    setDraft(value !== undefined ? String(value) : '')
+  }, [value])
+
+  function commit(str: string) {
+    const raw = isInt ? Math.round(parseFloat(str)) : parseFloat(str)
+    if (str.trim() === '' || isNaN(raw)) {
+      const prev = savedRef.current
+      setDraft(prev !== undefined ? String(prev) : '')
+      onChange(prev)
+    } else {
+      setDraft(String(raw))
+      onChange(raw)
+    }
+  }
+
+  return (
+    <input
+      type="text"
+      inputMode={isInt ? 'numeric' : 'decimal'}
+      value={draft}
+      className={editInputCls}
+      onFocus={() => { savedRef.current = value }}
+      onChange={e => setDraft(e.target.value)}
+      onBlur={e => commit(e.target.value)}
+      onKeyDown={e => {
+        const el = e.target as HTMLInputElement
+        if (e.key === 'Enter')  { commit(el.value); el.blur() }
+        if (e.key === 'Escape') {
+          const prev = savedRef.current
+          setDraft(prev !== undefined ? String(prev) : '')
+          onChange(prev)
+          el.blur()
+        }
+      }}
+    />
+  )
+}
+
+function EditRow({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="grid grid-cols-[1fr_auto] gap-2 items-center">
+      <span className="font-mono text-2xs text-text-muted">{label}</span>
+      {children}
+    </div>
+  )
 }
 
 function SpikeTrainsTab({
@@ -66,8 +125,18 @@ function SpikeTrainsTab({
   )
 }
 
-export default function PropertiesPanel({ network, potentials, nodeNames, spikeTransits, timestep }: Props) {
+export default function PropertiesPanel({ network, potentials, nodeNames, spikeTransits, timestep, onProcParamsChange }: Props) {
   const [activeTab, setActiveTab] = useState<'potentials' | 'spike-trains'>('potentials')
+  const [editMode, setEditMode] = useState(false)
+  const [draftParams, setDraftParams] = useState<RispProcParams>(RISP_127)
+  const [draftSimTime, setDraftSimTime] = useState<number | undefined>(undefined)
+
+  // Re-seed draft when the network changes from outside while the form is open — external change wins.
+  useEffect(() => {
+    if (!editMode || !network) return
+    setDraftParams(network.Associated_Data.proc_params ?? RISP_127)
+    setDraftSimTime(network.Associated_Data.other?.sim_time)
+  }, [network, editMode])
 
   if (!network) {
     return (
@@ -93,6 +162,43 @@ export default function PropertiesPanel({ network, potentials, nodeNames, spikeT
     ['min_potential', String(proc.min_potential)],
   ]
 
+  const hasWeightsArray = (draftParams.weights?.length ?? 0) > 0
+  const switchingToDiscrete = editMode && draftParams.discrete && !(proc.discrete)
+
+  const validationErrors: string[] = []
+  if (editMode) {
+    if (draftParams.min_threshold > draftParams.max_threshold)
+      validationErrors.push('min_threshold must be ≤ max_threshold')
+    if (!hasWeightsArray && (draftParams.min_weight ?? 0) > (draftParams.max_weight ?? 0))
+      validationErrors.push('min_weight must be ≤ max_weight')
+    if (draftParams.max_delay < 1)
+      validationErrors.push('max_delay must be ≥ 1')
+    if (draftParams.min_potential > 0)
+      validationErrors.push('min_potential must be ≤ 0')
+    if (draftSimTime !== undefined && draftSimTime < 1)
+      validationErrors.push('sim_time must be ≥ 1')
+    if (draftParams.discrete) {
+      if (!Number.isInteger(draftParams.min_threshold))
+        validationErrors.push('min_threshold must be an integer when discrete')
+      if (!Number.isInteger(draftParams.max_threshold))
+        validationErrors.push('max_threshold must be an integer when discrete')
+      if (!Number.isInteger(draftParams.min_potential))
+        validationErrors.push('min_potential must be an integer when discrete')
+      if (!hasWeightsArray) {
+        if (!Number.isInteger(draftParams.min_weight ?? 0))
+          validationErrors.push('min_weight must be an integer when discrete')
+        if (!Number.isInteger(draftParams.max_weight ?? 0))
+          validationErrors.push('max_weight must be an integer when discrete')
+      }
+    }
+  }
+
+  const handleSave = () => {
+    if (!onProcParamsChange || validationErrors.length > 0) return
+    onProcParamsChange(draftParams, draftSimTime)
+    setEditMode(false)
+  }
+
   const nodeProps = network.Properties?.node_properties ?? []
   const edgeProps = network.Properties?.edge_properties ?? []
 
@@ -107,18 +213,124 @@ export default function PropertiesPanel({ network, potentials, nodeNames, spikeT
         >
           Processor Params
         </span>
-        {usingDefault && (
-          <span className="font-mono text-2xs text-text-muted opacity-80" title="No proc_params in JSON — using RISP-127 defaults">RISP-127 default</span>
-        )}
+        <div className="flex items-center gap-3">
+          {usingDefault && !editMode && (
+            <span className="font-mono text-2xs text-text-muted opacity-80" title="No proc_params in JSON — using RISP-127 defaults">
+              RISP-127 default
+            </span>
+          )}
+          {onProcParamsChange && (
+            <button
+              onClick={() => setEditMode(v => !v)}
+              className="font-mono text-2xs text-text-muted hover:text-text-secondary transition-colors"
+            >
+              {editMode ? 'cancel' : 'edit →'}
+            </button>
+          )}
+        </div>
       </div>
-      <div className="p-3 space-y-1.5 flex-shrink-0">
-        {procRows.map(([k, v]) => (
-          <div key={k} className="grid grid-cols-[1fr_auto] gap-3 font-mono text-xs">
-            <span className="text-text-muted">{k}</span>
-            <span className="text-text-secondary">{v}</span>
-          </div>
-        ))}
-      </div>
+
+      {editMode ? (
+        <div className="p-3 space-y-2 flex-shrink-0">
+
+          <EditRow label="sim_time">
+            <DraftInput
+              value={draftSimTime}
+              isInt
+              onChange={v => setDraftSimTime(v)}
+            />
+          </EditRow>
+
+          <EditRow label="discrete">
+            <button
+              onClick={() => setDraftParams(p => ({ ...p, discrete: !p.discrete }))}
+              className={`px-3 py-0.5 font-mono text-xs border transition-colors ${
+                draftParams.discrete
+                  ? 'border-text-secondary text-text-secondary'
+                  : 'border-border text-text-muted hover:border-text-muted'
+              }`}
+            >
+              {draftParams.discrete ? 'true' : 'false'}
+            </button>
+          </EditRow>
+
+          <EditRow label="leak_mode">
+            <select
+              value={draftParams.leak_mode ?? 'none'}
+              className={editInputCls}
+              onChange={e => setDraftParams(p => ({ ...p, leak_mode: e.target.value as RispProcParams['leak_mode'] }))}
+            >
+              <option value="none">none</option>
+              <option value="all">all</option>
+              <option value="configurable">configurable</option>
+            </select>
+          </EditRow>
+
+          <EditRow label="min_threshold">
+            <DraftInput value={draftParams.min_threshold} isInt={draftParams.discrete}
+              onChange={v => { if (v !== undefined) setDraftParams(p => ({ ...p, min_threshold: v })) }} />
+          </EditRow>
+          <EditRow label="max_threshold">
+            <DraftInput value={draftParams.max_threshold} isInt={draftParams.discrete}
+              onChange={v => { if (v !== undefined) setDraftParams(p => ({ ...p, max_threshold: v })) }} />
+          </EditRow>
+
+          {hasWeightsArray ? (
+            <EditRow label="weight range">
+              <span className="font-mono text-2xs text-text-muted opacity-60">weights array</span>
+            </EditRow>
+          ) : (
+            <>
+              <EditRow label="min_weight">
+                <DraftInput value={draftParams.min_weight ?? undefined} isInt={draftParams.discrete}
+                  onChange={v => { if (v !== undefined) setDraftParams(p => ({ ...p, min_weight: v })) }} />
+              </EditRow>
+              <EditRow label="max_weight">
+                <DraftInput value={draftParams.max_weight ?? undefined} isInt={draftParams.discrete}
+                  onChange={v => { if (v !== undefined) setDraftParams(p => ({ ...p, max_weight: v })) }} />
+              </EditRow>
+            </>
+          )}
+
+          <EditRow label="max_delay">
+            <DraftInput value={draftParams.max_delay} isInt
+              onChange={v => { if (v !== undefined) setDraftParams(p => ({ ...p, max_delay: v })) }} />
+          </EditRow>
+
+          <EditRow label="min_potential">
+            <DraftInput value={draftParams.min_potential}
+              onChange={v => { if (v !== undefined) setDraftParams(p => ({ ...p, min_potential: v })) }} />
+          </EditRow>
+
+          {switchingToDiscrete && (
+            <p className="font-mono text-2xs text-text-muted">
+              Switching to discrete mode will round all threshold, weight, and potential values to integers.
+            </p>
+          )}
+
+          {validationErrors.map((err, i) => (
+            <p key={i} className="font-mono text-2xs" style={{ color: '#d4622a' }}>{err}</p>
+          ))}
+
+          <button
+            onClick={handleSave}
+            disabled={validationErrors.length > 0}
+            className="font-mono text-xs text-text-muted border border-border px-3 py-1 hover:border-text-muted hover:text-text-secondary transition-colors disabled:opacity-30"
+          >
+            Save →
+          </button>
+
+        </div>
+      ) : (
+        <div className="p-3 space-y-1.5 flex-shrink-0">
+          {procRows.map(([k, v]) => (
+            <div key={k} className="grid grid-cols-[1fr_auto] gap-3 font-mono text-xs">
+              <span className="text-text-muted">{k}</span>
+              <span className="text-text-secondary">{v}</span>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Property definitions */}
       {(nodeProps.length > 0 || edgeProps.length > 0) && (

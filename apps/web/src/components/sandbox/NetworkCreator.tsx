@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { RispNetwork, RispProcParams } from '@shared/types'
 
 interface FormState {
@@ -92,19 +92,37 @@ function NumField({
   isInt?: boolean
   onChange: (v: number) => void
 }) {
+  const [draft, setDraft] = useState(String(value))
+  const savedRef = useRef(value)
+
+  useEffect(() => { setDraft(String(value)) }, [value])
+
+  function commit(str: string) {
+    const raw = isInt ? Math.round(parseFloat(str)) : parseFloat(str)
+    if (str.trim() === '' || isNaN(raw)) {
+      setDraft(String(savedRef.current)); onChange(savedRef.current)
+    } else {
+      setDraft(String(raw)); onChange(raw)
+    }
+  }
+
   return (
     <div>
       <label className="font-mono text-2xs text-text-muted block mb-1">
         {label}{typeBadge && <TypeBadge code={typeBadge} />}
       </label>
       <input
-        type="number"
-        value={value}
-        step={isInt ? 1 : 'any'}
+        type="text"
+        inputMode={isInt ? 'numeric' : 'decimal'}
+        value={draft}
         className={inputCls}
-        onChange={e => {
-          const n = isInt ? Math.round(parseFloat(e.target.value)) : parseFloat(e.target.value)
-          if (!isNaN(n)) onChange(n)
+        onFocus={() => { savedRef.current = value }}
+        onChange={e => setDraft(e.target.value)}
+        onBlur={e => commit(e.target.value)}
+        onKeyDown={e => {
+          const el = e.target as HTMLInputElement
+          if (e.key === 'Enter')  { commit(el.value); el.blur() }
+          if (e.key === 'Escape') { setDraft(String(savedRef.current)); onChange(savedRef.current); el.blur() }
         }}
       />
     </div>

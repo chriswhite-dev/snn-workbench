@@ -57,41 +57,50 @@ function readWasmState(mod: RispModule): ParsedState | null {
   }
 }
 
+type OutEdge = { edgeId: string; to: number; delay: number }
+
+function buildAdjacency(edges: RispNetwork['Edges']): Map<number, OutEdge[]> {
+  const adj = new Map<number, OutEdge[]>()
+  for (const edge of edges) {
+    let list = adj.get(edge.from)
+    if (!list) { list = []; adj.set(edge.from, list) }
+    list.push({ edgeId: `${edge.from}->${edge.to}`, to: edge.to, delay: Math.max(1, Math.round(edge.values[1] ?? 1)) })
+  }
+  return adj
+}
+
 // arrivesAt >= newT keeps delay-1 spikes visible for exactly one frame at progress=1.
 function computeTransits(
   prev: SpikeTransit[],
   spikingNodes: number[],
   currentT: number,
   newT: number,
-  net: RispNetwork | null,
+  outEdges: Map<number, OutEdge[]>,
 ): SpikeTransit[] {
   const next: SpikeTransit[] = []
 
   for (const tr of prev) {
     if (tr.arrivesAt >= newT) {
-      const elapsed = newT - tr.launchedAt
+      const elapsed  = newT - tr.launchedAt
       const duration = tr.arrivesAt - tr.launchedAt
       next.push({ ...tr, progress: elapsed / duration })
     }
   }
 
-  if (net) {
-    for (const nodeId of spikingNodes) {
-      for (const edge of net.Edges) {
-        if (edge.from === nodeId) {
-          const delay = Math.max(1, Math.round(edge.values[1] ?? 1))
-          const arrivesAt = currentT + delay
-          if (arrivesAt >= newT) {
-            next.push({
-              edgeId: `${edge.from}->${edge.to}`,
-              fromNode: edge.from,
-              toNode: edge.to,
-              launchedAt: currentT,
-              arrivesAt,
-              progress: (newT - currentT) / delay,
-            })
-          }
-        }
+  for (const nodeId of spikingNodes) {
+    const outs = outEdges.get(nodeId)
+    if (!outs) continue
+    for (const { edgeId, to, delay } of outs) {
+      const arrivesAt = currentT + delay
+      if (arrivesAt >= newT) {
+        next.push({
+          edgeId,
+          fromNode: nodeId,
+          toNode:   to,
+          launchedAt: currentT,
+          arrivesAt,
+          progress: (newT - currentT) / delay,
+        })
       }
     }
   }
@@ -111,6 +120,7 @@ export function useSimulation(network: RispNetwork | null) {
   const inputScheduleRef = useRef<number[][]>([])
   const networkJsonRef = useRef<string | null>(null)
   const transitsRef = useRef<SpikeTransit[]>([])
+  const outEdgesRef = useRef<Map<number, OutEdge[]>>(new Map())
   const skipNextNetworkEffect = useRef(false)
 
   useEffect(() => { networkRef.current = network }, [network])
@@ -131,6 +141,7 @@ export function useSimulation(network: RispNetwork | null) {
     inputScheduleRef.current = []
     timestepRef.current = 0
     transitsRef.current = []
+    outEdgesRef.current = buildAdjacency(net.Edges)
     try {
       mod.ccall('load_network', null, ['string'], [JSON.stringify(net)])
       const s = readWasmState(mod)
@@ -219,7 +230,7 @@ export function useSimulation(network: RispNetwork | null) {
       s.spikes ?? [],
       currentT,
       newT,
-      networkRef.current,
+      outEdgesRef.current,
     )
     transitsRef.current = freshTransits
 
@@ -305,7 +316,7 @@ export function useSimulation(network: RispNetwork | null) {
       mod.ccall('step', null, [], [])
       const s = readWasmState(mod)
       if (s && s.timestep !== undefined) {
-        transits = computeTransits(transits, s.spikes ?? [], i, s.timestep, networkRef.current)
+        transits = computeTransits(transits, s.spikes ?? [], i, s.timestep, outEdgesRef.current)
         newHistory.push({ timestep: i, nodes: s.spikes ?? [] })
       }
     }
@@ -348,6 +359,7 @@ export function useSimulation(network: RispNetwork | null) {
     networkRef.current = net
     networkJsonRef.current = JSON.stringify(net)
     simTimeRef.current = net.Associated_Data?.other?.sim_time
+    outEdgesRef.current = buildAdjacency(net.Edges)
     seek(timestepRef.current)
   }, [seek])
 
@@ -358,6 +370,7 @@ export function useSimulation(network: RispNetwork | null) {
     networkRef.current = net
     networkJsonRef.current = JSON.stringify(net)
     simTimeRef.current = net.Associated_Data?.other?.sim_time
+    outEdgesRef.current = buildAdjacency(net.Edges)
   }, [])
 
   return { ...state, step, play, pause, reset, seek, applySpikes, setScheduleAt, getScheduleAt, softReload, silentNetworkUpdate }

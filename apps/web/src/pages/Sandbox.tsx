@@ -1,7 +1,8 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import type { RispNetwork, NetworkMeta } from '@shared/types'
+import type { RispNetwork, NetworkMeta, RispProcParams } from '@shared/types'
 import { api } from '../lib/api'
+import { applyProcParams } from '../lib/network'
 import { useSimulation } from '../hooks/useSimulation'
 import UploadZone from '../components/sandbox/UploadZone'
 import NetworkCreator from '../components/sandbox/NetworkCreator'
@@ -96,6 +97,10 @@ export default function Sandbox() {
     () => bottomTab === 'explorer' ? { nodeId: explorerSelNodeId, edgeId: explorerSelEdgeId } : null,
     [bottomTab, explorerSelNodeId, explorerSelEdgeId]
   )
+
+  useEffect(() => {
+    canvasRef.current?.updateSimVisuals(sim.spikes, sim.transits)
+  }, [sim.spikes, sim.transits])
 
   function handleFileLoad(parsed: RispNetwork, file: File) {
     setNetwork(parsed)
@@ -203,6 +208,18 @@ export default function Sandbox() {
     setScheduleVersion(v => v + 1)
     if (draftTimestep === t) setDraftTimestep(null)
     if (t <= sim.timestep) sim.seek(t)
+  }
+
+  function handleProcParamsChange(newParams: RispProcParams, newSimTime?: number) {
+    if (!network) return
+    const coordMap = canvasRef.current?.getLayoutMap()
+    const newNetwork = applyProcParams(network, newParams, newSimTime, coordMap)
+    setNetwork(newNetwork)
+    sim.silentNetworkUpdate(newNetwork)
+    sim.seek(0)
+    setDraftTimestep(null)
+    setScheduleText('')
+    setScheduleError(null)
   }
 
   async function handleUploadToLibrary() {
@@ -366,18 +383,16 @@ export default function Sandbox() {
                 network={network}
                 onChange={(net) => {
                   const onlyNodesAdded =
-                    JSON.stringify(network.Edges) === JSON.stringify(net.Edges) &&
-                    JSON.stringify(network.Inputs) === JSON.stringify(net.Inputs) &&
-                    JSON.stringify(network.Outputs) === JSON.stringify(net.Outputs) &&
-                    net.Nodes.length > network.Nodes.length
+                    net.Nodes.length   > network.Nodes.length   &&
+                    net.Edges.length  === network.Edges.length  &&
+                    net.Inputs.length === network.Inputs.length &&
+                    net.Outputs.length === network.Outputs.length
                   if (onlyNodesAdded) sim.silentNetworkUpdate(net)
                   else sim.softReload(net)
                   setNetwork(net)
                 }}
                 readOnly={sim.running}
                 externalSelection={externalSelection}
-                spikingNodeIds={sim.spikes}
-                spikeTransits={sim.transits}
               />
               <SimControls
                 loaded={sim.loaded}
@@ -470,6 +485,7 @@ export default function Sandbox() {
                 nodeNames={nodeNames}
                 spikeTransits={sim.transits}
                 timestep={sim.timestep}
+                onProcParamsChange={handleProcParamsChange}
               />
             </div>
           </div>

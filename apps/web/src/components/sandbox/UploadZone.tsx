@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'react'
-import type { RispNetwork, RispProcParams } from '@shared/types'
+import type { RispNetwork, RispProcParams, RispEdge } from '@shared/types'
 
 function validateFrameworkNetwork(json: unknown): string | null {
   if (!json || typeof json !== 'object' || Array.isArray(json)) {
@@ -21,6 +21,11 @@ function validateFrameworkNetwork(json: unknown): string | null {
   if (!Array.isArray(j.Inputs)) return 'Missing or invalid "Inputs" array'
   if (!Array.isArray(j.Outputs)) return 'Missing or invalid "Outputs" array'
   if (j.Nodes.length === 0) return 'Network must have at least one node'
+
+  const inputSet = new Set(j.Inputs as unknown[])
+  for (const id of j.Outputs as unknown[]) {
+    if (inputSet.has(id)) return `Node ${id} appears in both Inputs and Outputs`
+  }
 
   return null
 }
@@ -50,9 +55,11 @@ function sanitizeNetwork(raw: Record<string, unknown>): RispNetwork {
   })
 
   const edges = (raw.Edges as Array<Record<string, unknown>>).map((e) => ({
-    from: e.from as number,
-    to: e.to as number,
+    from:   e.from   as number,
+    to:     e.to     as number,
     values: e.values as number[],
+    ...(typeof e.source_handle === 'string' ? { source_handle: e.source_handle as RispEdge['source_handle'] } : {}),
+    ...(typeof e.target_handle === 'string' ? { target_handle: e.target_handle as RispEdge['target_handle'] } : {}),
   }))
 
   // Strips app_params, eons_params, encoder/decoder_array, other.app_name; fills default proc_params if absent.
