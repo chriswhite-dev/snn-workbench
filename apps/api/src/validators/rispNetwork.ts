@@ -25,12 +25,17 @@ const RispNodeSchema = z.object({
   id: z.number().int().nonnegative(),
   values: z.array(z.number()).min(1).max(MAX_VALUES_PER_ELEMENT),
   name: z.string().max(128).optional(),
+  coords: z.object({ x: z.number(), y: z.number() }).optional(),
 })
 
+const HandlePosSchema = z.enum(['n', 'ne', 'e', 'se', 's', 'sw', 'w', 'nw'])
+
 const RispEdgeSchema = z.object({
-  from: z.number().int().nonnegative(),
-  to: z.number().int().nonnegative(),
-  values: z.array(z.number()).min(1).max(MAX_VALUES_PER_ELEMENT),
+  from:          z.number().int().nonnegative(),
+  to:            z.number().int().nonnegative(),
+  values:        z.array(z.number()).min(1).max(MAX_VALUES_PER_ELEMENT),
+  source_handle: HandlePosSchema.optional(),
+  target_handle: HandlePosSchema.optional(),
 })
 
 const RispProcParamsSchema = z.object({
@@ -95,6 +100,10 @@ export function validateRispNetwork(raw: unknown): ValidationResult {
   }
   for (const id of Outputs) {
     if (!nodeIds.has(id)) errors.push(`Outputs: node id ${id} not found in Nodes`)
+  }
+  const inputIdSet = new Set(Inputs)
+  for (const id of Outputs) {
+    if (inputIdSet.has(id)) errors.push(`Node ${id} appears in both Inputs and Outputs`)
   }
   for (const edge of Edges) {
     if (!nodeIds.has(edge.from))

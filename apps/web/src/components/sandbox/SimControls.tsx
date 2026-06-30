@@ -3,6 +3,7 @@ interface Props {
   running: boolean
   timestep: number
   simTime: number | undefined
+  completed: boolean
   onStep: () => void
   onBack: () => void
   onPlay: () => void
@@ -17,6 +18,7 @@ export default function SimControls({
   running,
   timestep,
   simTime,
+  completed,
   onStep,
   onBack,
   onPlay,
@@ -25,7 +27,7 @@ export default function SimControls({
   onRewind,
   onSeek,
 }: Props) {
-  const done = simTime !== undefined && timestep >= simTime
+  const done = completed
   const progress = simTime !== undefined && simTime > 0 ? Math.min(timestep / simTime, 1) : null
 
   function handleSeekClick(e: React.MouseEvent<HTMLDivElement>) {
@@ -94,14 +96,9 @@ export default function SimControls({
         <div className="flex items-center gap-4 ml-auto px-4">
           <span className="font-mono text-xs text-text-secondary" title="Current timestep / total simulation timesteps">
             {simTime !== undefined
-              ? `t = ${timestep} / ${simTime}`
-              : `t = ${timestep}`}
+              ? timestep === 0 ? `Init / ${simTime - 1}` : `t = ${timestep - 1} / ${simTime - 1}`
+              : timestep === 0 ? 'Init' : `t = ${timestep - 1}`}
           </span>
-          {done && (
-            <span className="font-mono text-2xs text-text-muted border-l border-border pl-4">
-              complete — reset to replay
-            </span>
-          )}
           {!loaded && (
             <span className="font-mono text-2xs text-text-muted border-l border-border pl-4">
               load a network above to begin
@@ -114,7 +111,7 @@ export default function SimControls({
         <div
           className="h-1.5 bg-border relative cursor-pointer group"
           onClick={handleSeekClick}
-          title={`Seek bar — click anywhere to jump to that timestep · currently t=${timestep} / ${simTime}`}
+          title={`Seek bar — click anywhere to jump to that timestep · currently ${timestep === 0 ? 'Init' : `t=${timestep - 1}`} / ${simTime! - 1}`}
         >
           <div
             className="absolute inset-y-0 left-0 bg-accent transition-all duration-100"

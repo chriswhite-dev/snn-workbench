@@ -17,12 +17,15 @@ export interface RispNode {
   id: number
   values: number[]
   name?: string
+  coords?: { x: number; y: number }
 }
 
 export interface RispEdge {
-  from: number
-  to: number
-  values: number[]
+  from:           number
+  to:             number
+  values:         number[]
+  source_handle?: 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w' | 'nw'
+  target_handle?: 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w' | 'nw'
 }
 
 export interface RispProcParams {

@@ -26,6 +26,7 @@ export interface SimState {
   history: SpikeEntry[]
   transits: SpikeTransit[]
   error: string | null
+  completed: boolean
 }
 
 const initial: SimState = {
@@ -38,6 +39,7 @@ const initial: SimState = {
   history: [],
   transits: [],
   error: null,
+  completed: false,
 }
 
 type ParsedState = {
@@ -55,41 +57,50 @@ function readWasmState(mod: RispModule): ParsedState | null {
   }
 }
 
+type OutEdge = { edgeId: string; to: number; delay: number }
+
+function buildAdjacency(edges: RispNetwork['Edges']): Map<number, OutEdge[]> {
+  const adj = new Map<number, OutEdge[]>()
+  for (const edge of edges) {
+    let list = adj.get(edge.from)
+    if (!list) { list = []; adj.set(edge.from, list) }
+    list.push({ edgeId: `${edge.from}->${edge.to}`, to: edge.to, delay: Math.max(1, Math.round(edge.values[1] ?? 1)) })
+  }
+  return adj
+}
+
 // arrivesAt >= newT keeps delay-1 spikes visible for exactly one frame at progress=1.
 function computeTransits(
   prev: SpikeTransit[],
   spikingNodes: number[],
   currentT: number,
   newT: number,
-  net: RispNetwork | null,
+  outEdges: Map<number, OutEdge[]>,
 ): SpikeTransit[] {
   const next: SpikeTransit[] = []
 
   for (const tr of prev) {
     if (tr.arrivesAt >= newT) {
-      const elapsed = newT - tr.launchedAt
+      const elapsed  = newT - tr.launchedAt
       const duration = tr.arrivesAt - tr.launchedAt
       next.push({ ...tr, progress: elapsed / duration })
     }
   }
 
-  if (net) {
-    for (const nodeId of spikingNodes) {
-      for (const edge of net.Edges) {
-        if (edge.from === nodeId) {
-          const delay = Math.max(1, Math.round(edge.values[1] ?? 1))
-          const arrivesAt = currentT + delay
-          if (arrivesAt >= newT) {
-            next.push({
-              edgeId: `${edge.from}->${edge.to}`,
-              fromNode: edge.from,
-              toNode: edge.to,
-              launchedAt: currentT,
-              arrivesAt,
-              progress: (newT - currentT) / delay,
-            })
-          }
-        }
+  for (const nodeId of spikingNodes) {
+    const outs = outEdges.get(nodeId)
+    if (!outs) continue
+    for (const { edgeId, to, delay } of outs) {
+      const arrivesAt = currentT + delay
+      if (arrivesAt >= newT) {
+        next.push({
+          edgeId,
+          fromNode: nodeId,
+          toNode:   to,
+          launchedAt: currentT,
+          arrivesAt,
+          progress: (newT - currentT) / delay,
+        })
       }
     }
   }
@@ -109,6 +120,8 @@ export function useSimulation(network: RispNetwork | null) {
   const inputScheduleRef = useRef<number[][]>([])
   const networkJsonRef = useRef<string | null>(null)
   const transitsRef = useRef<SpikeTransit[]>([])
+  const outEdgesRef = useRef<Map<number, OutEdge[]>>(new Map())
+  const skipNextNetworkEffect = useRef(false)
 
   useEffect(() => { networkRef.current = network }, [network])
 
@@ -128,6 +141,7 @@ export function useSimulation(network: RispNetwork | null) {
     inputScheduleRef.current = []
     timestepRef.current = 0
     transitsRef.current = []
+    outEdgesRef.current = buildAdjacency(net.Edges)
     try {
       mod.ccall('load_network', null, ['string'], [JSON.stringify(net)])
       const s = readWasmState(mod)
@@ -137,6 +151,7 @@ export function useSimulation(network: RispNetwork | null) {
           ...prev,
           loaded: false,
           error: errMsg || 'load_network failed (no error details)',
+          completed: false,
         }))
         return
       }
@@ -150,9 +165,10 @@ export function useSimulation(network: RispNetwork | null) {
         history: [],
         transits: [],
         error: null,
+        completed: false,
       })
     } catch (e) {
-      setState(prev => ({ ...prev, loaded: false, error: String(e) }))
+      setState(prev => ({ ...prev, loaded: false, error: String(e), completed: false }))
     }
   }
 
@@ -173,6 +189,10 @@ export function useSimulation(network: RispNetwork | null) {
   }, [])
 
   useEffect(() => {
+    if (skipNextNetworkEffect.current) {
+      skipNextNetworkEffect.current = false
+      return
+    }
     if (!network) {
       setState(initial)
       simTimeRef.current = undefined
@@ -202,21 +222,25 @@ export function useSimulation(network: RispNetwork | null) {
     const newT = s.timestep
     timestepRef.current = newT
 
+    const simTime = simTimeRef.current
+    const completed = simTime !== undefined && newT >= simTime
+
     const freshTransits = computeTransits(
       transitsRef.current,
       s.spikes ?? [],
       currentT,
       newT,
-      networkRef.current,
+      outEdgesRef.current,
     )
     transitsRef.current = freshTransits
 
     setState(prev => ({
       ...prev,
       timestep: newT,
+      completed,
       potentials: s.potentials ?? {},
       spikes: s.spikes ?? [],
-      history: [...prev.history.slice(-49), { timestep: currentT, nodes: s.spikes ?? [] }],
+      history: [...prev.history, { timestep: currentT, nodes: s.spikes ?? [] }],
       transits: freshTransits,
     }))
     return newT
@@ -264,6 +288,7 @@ export function useSimulation(network: RispNetwork | null) {
       ...prev,
       running: false,
       timestep: 0,
+      completed: false,
       potentials: {},
       spikes: [],
       history: [],
@@ -291,7 +316,7 @@ export function useSimulation(network: RispNetwork | null) {
       mod.ccall('step', null, [], [])
       const s = readWasmState(mod)
       if (s && s.timestep !== undefined) {
-        transits = computeTransits(transits, s.spikes ?? [], i, s.timestep, networkRef.current)
+        transits = computeTransits(transits, s.spikes ?? [], i, s.timestep, outEdgesRef.current)
         newHistory.push({ timestep: i, nodes: s.spikes ?? [] })
       }
     }
@@ -299,20 +324,23 @@ export function useSimulation(network: RispNetwork | null) {
     const finalState = readWasmState(mod)
     transitsRef.current = transits
     timestepRef.current = t
+    const simTime = simTimeRef.current
+    const completed = simTime !== undefined && t >= simTime
     setState(prev => ({
       ...prev,
       loaded: true,
       running: false,
       timestep: t,
+      completed,
       potentials: finalState?.potentials ?? {},
       spikes: finalState?.spikes ?? [],
-      history: newHistory.slice(-50),
+      history: newHistory,
       transits,
     }))
   }, [])
 
   const setScheduleAt = useCallback((t: number, ids: number[]) => {
-    inputScheduleRef.current[t] = ids
+    inputScheduleRef.current[t] = [...ids].sort((a, b) => a - b)
   }, [])
 
   const getScheduleAt = useCallback((t: number): number[] => {
@@ -323,5 +351,27 @@ export function useSimulation(network: RispNetwork | null) {
     modRef.current?.ccall('apply_spikes', null, ['string'], [JSON.stringify(nodeIds)])
   }, [])
 
-  return { ...state, step, play, pause, reset, seek, applySpikes, setScheduleAt, getScheduleAt }
+  // Reload WASM with an edited network without wiping simulation state or schedule.
+  // Replays to the current timestep so history and potentials stay consistent.
+  const softReload = useCallback((net: RispNetwork) => {
+    if (!modRef.current) return
+    skipNextNetworkEffect.current = true
+    networkRef.current = net
+    networkJsonRef.current = JSON.stringify(net)
+    simTimeRef.current = net.Associated_Data?.other?.sim_time
+    outEdgesRef.current = buildAdjacency(net.Edges)
+    seek(timestepRef.current)
+  }, [seek])
+
+  // Update network refs without replaying — safe when the change cannot affect
+  // existing simulation results (e.g. a neuron added with no new synapses).
+  const silentNetworkUpdate = useCallback((net: RispNetwork) => {
+    skipNextNetworkEffect.current = true
+    networkRef.current = net
+    networkJsonRef.current = JSON.stringify(net)
+    simTimeRef.current = net.Associated_Data?.other?.sim_time
+    outEdgesRef.current = buildAdjacency(net.Edges)
+  }, [])
+
+  return { ...state, step, play, pause, reset, seek, applySpikes, setScheduleAt, getScheduleAt, softReload, silentNetworkUpdate }
 }
