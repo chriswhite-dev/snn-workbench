@@ -55,6 +55,7 @@ export default function Sandbox() {
       .then(async (res) => {
         setMeta(res.data)
         const fileRes = await fetch(res.data.file_url)
+        if (!fileRes.ok) throw new Error(`Failed to load network file (${fileRes.status})`)
         const json = await fileRes.json() as RispNetwork
         setNetwork(json)
       })
